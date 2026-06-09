@@ -89,15 +89,24 @@ if (!localStorage.getItem('scm_v2_clean')) {
  *     EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'atasan')
  *   );
  *
+ *
+ * -- TEST: cek apakah insert manual berhasil (ganti [user-uuid] dengan UUID dari auth.users)
+ * -- INSERT INTO tasks (id, text, auth_user_id, date, done, priority, status)
+ * -- VALUES (gen_random_uuid(), 'test task manual', '[user-uuid]', '2026-06-10', false, 'sedang', 'belum_mulai');
+ * -- SELECT * FROM tasks WHERE auth_user_id = '[user-uuid]';
+ *
  * ────────────────────────────────────────────────────────────────────────
  */
 
 /* ── Project accent colors (not stored in DB) ─────────────────────────── */
 const PROJ_PALETTE = ['#C2185B','#7C6FF7','#4ECBA4','#F5A623','#F06060','#4FC3F7','#9575CD','#26A69A'];
 
-/* ── Fire-and-forget Supabase mutation (logs errors, never throws) ────── */
-const dbFire = (q: PromiseLike<unknown>) =>
-  Promise.resolve(q).catch(e => console.error('[Supabase]', e));
+/* ── Fire-and-forget Supabase mutation (logs full error, never throws) ── */
+const dbFire = (label: string, q: PromiseLike<{ error: any }>) =>
+  Promise.resolve(q).then(({ error }) => {
+    if (error) console.error(`[Supabase][${label}] ERROR:`, error.message, error);
+    else console.log(`[Supabase][${label}] OK`);
+  }).catch(e => console.error(`[Supabase][${label}] EXCEPTION:`, e));
 
 /* ── Types ────────────────────────────────────────────────────────────── */
 type Priority   = 'tinggi' | 'sedang' | 'rendah';
@@ -135,7 +144,7 @@ const CAT_COLORS:Record<TLItem['category'],string> = { meeting:'#F5A623', coding
 const CAT_ICONS:Record<TLItem['category'],typeof Coffee> = { meeting:Coffee, coding:Code, review:Activity, other:Briefcase };
 
 /* ── Storage utils ────────────────────────────────────────────────────── */
-const uid = () => Math.random().toString(36).slice(2, 10);
+const uid = () => crypto.randomUUID();
 const todayStr = () => format(new Date(), 'yyyy-MM-dd');
 function load<T>(key:string, fallback:T):T {
   try { return JSON.parse(localStorage.getItem(key)||'null') ?? fallback; } catch { return fallback; }
@@ -1603,51 +1612,72 @@ export default function App() {
     }
   }, [viewingUserId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Supabase helpers (use auth_user_id) ───────────────────────────── */
-  // Use getSession() inside each IIFE so auth_user_id is always fresh, never stale closure.
+  /* ── Get current user id (always fresh from session) ──────────────── */
+  const getUid = async (): Promise<string|null> => {
+    const { data: { session } } = await supabase.auth.getSession();
+    const uid = session?.user?.id ?? null;
+    if (!uid) console.warn('[Supabase] getUid: no active session!');
+    else console.log('[Supabase] getUid:', uid);
+    return uid;
+  };
+
+  /* ── Supabase sync helpers ──────────────────────────────────────────── */
   const syncTasks = (date: string, tasks: Task[]) => {
     (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const curUid = session?.user?.id;
-      if (!curUid) return;
-      await supabase.from('tasks').delete().eq('auth_user_id', curUid).eq('date', date);
-      if (tasks.length)
-        await supabase.from('tasks').insert(
-          tasks.map(t => ({ id:t.id, auth_user_id:curUid, date, text:t.text, done:t.done, priority:t.priority, status:t.status }))
-        );
+      const curUid = await getUid(); if (!curUid) return;
+      const { error: delErr } = await supabase.from('tasks').delete().eq('auth_user_id', curUid).eq('date', date);
+      if (delErr) { console.error('[Supabase][syncTasks] delete error:', delErr.message); return; }
+      if (!tasks.length) { console.log('[Supabase][syncTasks] cleared tasks for', date); return; }
+      const { error: insErr } = await supabase.from('tasks').insert(
+        tasks.map(t => ({ auth_user_id:curUid, date, text:t.text, done:t.done, priority:t.priority, status:t.status }))
+      );
+      if (insErr) console.error('[Supabase][syncTasks] insert error:', insErr.message, insErr);
+      else console.log('[Supabase][syncTasks] synced', tasks.length, 'tasks for', date);
     })().catch(console.error);
   };
 
   const syncTimeline = (date: string, timeline: TLItem[]) => {
     (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const curUid = session?.user?.id;
-      if (!curUid) return;
-      await supabase.from('timeline').delete().eq('auth_user_id', curUid).eq('date', date);
-      if (timeline.length)
-        await supabase.from('timeline').insert(
-          timeline.map(tl => ({ id:tl.id, auth_user_id:curUid, date, time:tl.time, title:tl.activity, status:tl.category }))
-        );
+      const curUid = await getUid(); if (!curUid) return;
+      const { error: delErr } = await supabase.from('timeline').delete().eq('auth_user_id', curUid).eq('date', date);
+      if (delErr) { console.error('[Supabase][syncTimeline] delete error:', delErr.message); return; }
+      if (!timeline.length) { console.log('[Supabase][syncTimeline] cleared timeline for', date); return; }
+      const { error: insErr } = await supabase.from('timeline').insert(
+        timeline.map(tl => ({ auth_user_id:curUid, date, time:tl.time, title:tl.activity, status:tl.category }))
+      );
+      if (insErr) console.error('[Supabase][syncTimeline] insert error:', insErr.message, insErr);
+      else console.log('[Supabase][syncTimeline] synced', timeline.length, 'items for', date);
     })().catch(console.error);
   };
 
   const syncNotes = (date: string, content: string) => {
     (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const curUid = session?.user?.id;
-      if (!curUid) return;
-      const { data } = await supabase.from('notes').select('id').eq('auth_user_id', curUid).eq('date', date).maybeSingle();
-      if (data)
-        await supabase.from('notes').update({ content, updated_at: new Date().toISOString() }).eq('id', data.id);
-      else
-        await supabase.from('notes').insert({ auth_user_id:curUid, date, content });
+      const curUid = await getUid(); if (!curUid) return;
+      const { data: existing, error: selErr } = await supabase.from('notes').select('id').eq('auth_user_id', curUid).eq('date', date).maybeSingle();
+      if (selErr) { console.error('[Supabase][syncNotes] select error:', selErr.message); return; }
+      if (existing) {
+        const { error } = await supabase.from('notes').update({ content, updated_at: new Date().toISOString() }).eq('id', existing.id);
+        if (error) console.error('[Supabase][syncNotes] update error:', error.message);
+        else console.log('[Supabase][syncNotes] updated note for', date);
+      } else {
+        const { error } = await supabase.from('notes').insert({ auth_user_id:curUid, date, content });
+        if (error) console.error('[Supabase][syncNotes] insert error:', error.message);
+        else console.log('[Supabase][syncNotes] inserted note for', date);
+      }
     })().catch(console.error);
   };
 
   /* ── Initial load from Supabase ────────────────────────────────────── */
   const loadAll = async (uid: string) => {
+    console.log('[loadAll] START uid:', uid);
     setLoading(true); setCloudErr(null);
-    const isOwnData = uid === myUserId;
+
+    // Verify session is active before querying
+    const { data: { session: chkSession } } = await supabase.auth.getSession();
+    console.log('[loadAll] session user:', chkSession?.user?.id ?? 'NO SESSION');
+
+    const isOwnData = !!(myUserId && uid === myUserId);
+    console.log('[loadAll] isOwnData:', isOwnData, '| myUserId:', myUserId);
     try {
       const [tasksRes, tlRes, notesRes, projRes, blockRes, settRes] = await Promise.all([
         supabase.from('tasks').select('*').eq('auth_user_id', uid),
@@ -1658,8 +1688,16 @@ export default function App() {
         supabase.from('settings').select('*').eq('auth_user_id', uid).maybeSingle(),
       ]);
 
+      console.log('[loadAll] fetch results:',
+        'tasks:', tasksRes.data?.length ?? 0, tasksRes.error?.message ?? 'OK',
+        '| projects:', projRes.data?.length ?? 0, projRes.error?.message ?? 'OK',
+        '| blockers:', blockRes.data?.length ?? 0, blockRes.error?.message ?? 'OK',
+        '| notes:', notesRes.data?.length ?? 0, notesRes.error?.message ?? 'OK',
+        '| settings:', settRes.data ? 'found' : 'not found', settRes.error?.message ?? 'OK'
+      );
+
       if (tasksRes.error || tlRes.error || notesRes.error || projRes.error || blockRes.error) {
-        const errMsg = tasksRes.error?.message || tlRes.error?.message || 'Query error';
+        const errMsg = tasksRes.error?.message || tlRes.error?.message || notesRes.error?.message || projRes.error?.message || blockRes.error?.message || 'Query error';
         throw new Error(errMsg);
       }
 
@@ -1767,44 +1805,71 @@ export default function App() {
   const addProject = (p: Project) => {
     setProjects(prev => [...prev, p]);
     persist('scm_proj_colors', { ...load<Record<string,string>>('scm_proj_colors',{}), [p.id]:p.color });
-    if (myUserId) dbFire(supabase.from('projects').insert({ id:p.id, auth_user_id:myUserId, name:p.name, progress:p.progress, status:p.status }));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('addProject', supabase.from('projects').insert({ id:p.id, auth_user_id:curUid, name:p.name, progress:p.progress, status:p.status }));
+    })();
   };
   const updateProject = (p: Project) => {
     setProjects(prev => prev.map(x => x.id===p.id ? p : x));
     persist('scm_proj_colors', { ...load<Record<string,string>>('scm_proj_colors',{}), [p.id]:p.color });
-    if (myUserId) dbFire(supabase.from('projects').update({ name:p.name, progress:p.progress, status:p.status }).eq('id',p.id).eq('auth_user_id',myUserId));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('updateProject', supabase.from('projects').update({ name:p.name, progress:p.progress, status:p.status }).eq('id',p.id).eq('auth_user_id',curUid));
+    })();
   };
   const deleteProject = (id: string) => {
     setProjects(prev => prev.filter(p => p.id!==id));
-    if (myUserId) dbFire(supabase.from('projects').delete().eq('id',id).eq('auth_user_id',myUserId));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('deleteProject', supabase.from('projects').delete().eq('id',id).eq('auth_user_id',curUid));
+    })();
   };
   const updateProjectProgress = (id: string, progress: number) => {
     setProjects(prev => prev.map(x => x.id===id ? { ...x, progress } : x));
-    if (myUserId) dbFire(supabase.from('projects').update({ progress }).eq('id',id).eq('auth_user_id',myUserId));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('updateProgress', supabase.from('projects').update({ progress }).eq('id',id).eq('auth_user_id',curUid));
+    })();
   };
 
   /* ── Blocker mutations ─────────────────────────────────────────────── */
   const addBlocker = (b: Blocker) => {
     setBlockers(prev => [...prev, b]);
-    if (myUserId) dbFire(supabase.from('blockers').insert({ id:b.id, auth_user_id:myUserId, title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('addBlocker', supabase.from('blockers').insert({ id:b.id, auth_user_id:curUid, title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }));
+    })();
   };
   const resolveBlocker = (id: string) => {
     setBlockers(prev => prev.map(b => b.id===id ? { ...b, resolved:true } : b));
-    if (myUserId) dbFire(supabase.from('blockers').update({ resolved:true }).eq('id',id).eq('auth_user_id',myUserId));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('resolveBlocker', supabase.from('blockers').update({ resolved:true }).eq('id',id).eq('auth_user_id',curUid));
+    })();
   };
   const deleteBlocker = (id: string) => {
     setBlockers(prev => prev.filter(b => b.id!==id));
-    if (myUserId) dbFire(supabase.from('blockers').delete().eq('id',id).eq('auth_user_id',myUserId));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('deleteBlocker', supabase.from('blockers').delete().eq('id',id).eq('auth_user_id',curUid));
+    })();
   };
   const updateBlocker = (b: Blocker) => {
     setBlockers(prev => prev.map(x => x.id===b.id ? b : x));
-    if (myUserId) dbFire(supabase.from('blockers').update({ title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }).eq('id',b.id).eq('auth_user_id',myUserId));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('updateBlocker', supabase.from('blockers').update({ title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }).eq('id',b.id).eq('auth_user_id',curUid));
+    })();
   };
 
   /* ── Settings mutation ─────────────────────────────────────────────── */
   const saveSettings = (s: AppSettings) => {
     setSettings(s);
-    if (myUserId) dbFire(supabase.from('settings').update({ nama:s.nama, jabatan:s.jabatan, target_task:s.targetTask, target_jam:s.targetJam, updated_at:new Date().toISOString() }).eq('auth_user_id',myUserId));
+    (async () => {
+      const curUid = await getUid(); if (!curUid) return;
+      dbFire('saveSettings', supabase.from('settings').update({ nama:s.nama, jabatan:s.jabatan, target_task:s.targetTask, target_jam:s.targetJam, updated_at:new Date().toISOString() }).eq('auth_user_id',curUid));
+    })();
   };
 
   /* ── Handlers ──────────────────────────────────────────────────────── */
