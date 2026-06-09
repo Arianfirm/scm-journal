@@ -32,6 +32,7 @@ if (!localStorage.getItem('scm_v2_clean')) {
 /*
  * ── SQL: jalankan di Supabase SQL Editor ────────────────────────────────
  *
+ * -- 1. Tabel profiles
  * CREATE TABLE IF NOT EXISTS profiles (
  *   id uuid REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
  *   nama text NOT NULL,
@@ -40,6 +41,7 @@ if (!localStorage.getItem('scm_v2_clean')) {
  *   created_at timestamp DEFAULT now()
  * );
  *
+ * -- 2. Tambah kolom auth_user_id ke semua tabel data
  * ALTER TABLE tasks     ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
  * ALTER TABLE projects  ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
  * ALTER TABLE blockers  ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
@@ -47,6 +49,7 @@ if (!localStorage.getItem('scm_v2_clean')) {
  * ALTER TABLE notes     ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
  * ALTER TABLE settings  ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
  *
+ * -- 3. Aktifkan RLS
  * ALTER TABLE tasks     ENABLE ROW LEVEL SECURITY;
  * ALTER TABLE projects  ENABLE ROW LEVEL SECURITY;
  * ALTER TABLE blockers  ENABLE ROW LEVEL SECURITY;
@@ -55,6 +58,7 @@ if (!localStorage.getItem('scm_v2_clean')) {
  * ALTER TABLE settings  ENABLE ROW LEVEL SECURITY;
  * ALTER TABLE profiles  ENABLE ROW LEVEL SECURITY;
  *
+ * -- 4. Policy: staff hanya lihat data sendiri
  * CREATE POLICY "staff_own_tasks"     ON tasks     FOR ALL USING (auth.uid() = auth_user_id);
  * CREATE POLICY "staff_own_projects"  ON projects  FOR ALL USING (auth.uid() = auth_user_id);
  * CREATE POLICY "staff_own_blockers"  ON blockers  FOR ALL USING (auth.uid() = auth_user_id);
@@ -62,6 +66,28 @@ if (!localStorage.getItem('scm_v2_clean')) {
  * CREATE POLICY "staff_own_notes"     ON notes     FOR ALL USING (auth.uid() = auth_user_id);
  * CREATE POLICY "staff_own_settings"  ON settings  FOR ALL USING (auth.uid() = auth_user_id);
  * CREATE POLICY "profiles_policy"     ON profiles  FOR ALL USING (true);
+ *
+ * -- 5. Policy: atasan bisa baca semua data (SELECT only, tidak bisa write)
+ * CREATE POLICY "atasan_read_tasks" ON tasks
+ *   FOR SELECT USING (
+ *     EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'atasan')
+ *   );
+ * CREATE POLICY "atasan_read_projects" ON projects
+ *   FOR SELECT USING (
+ *     EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'atasan')
+ *   );
+ * CREATE POLICY "atasan_read_blockers" ON blockers
+ *   FOR SELECT USING (
+ *     EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'atasan')
+ *   );
+ * CREATE POLICY "atasan_read_timeline" ON timeline
+ *   FOR SELECT USING (
+ *     EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'atasan')
+ *   );
+ * CREATE POLICY "atasan_read_notes" ON notes
+ *   FOR SELECT USING (
+ *     EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'atasan')
+ *   );
  *
  * ────────────────────────────────────────────────────────────────────────
  */
@@ -1321,8 +1347,9 @@ function RegisterPage({ onSwitch }:{ onSwitch:()=>void }) {
     nama:'', jabatan:'', email:'', password:'', confirm:'',
     role:'staff' as 'staff'|'atasan',
   });
-  const [loading, setLoading]  = useState(false);
-  const [error,   setError]    = useState<string|null>(null);
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState<string|null>(null);
+  const [needsConfirm, setNeedsConfirm] = useState(false);
   const set = (k: keyof typeof form, v: string) => setForm(prev => ({ ...prev, [k]:v }));
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1332,17 +1359,47 @@ function RegisterPage({ onSwitch }:{ onSwitch:()=>void }) {
     if (form.password.length < 6)      { setError('Password minimal 6 karakter.'); return; }
     if (form.password !== form.confirm) { setError('Konfirmasi password tidak cocok.'); return; }
     setLoading(true);
+
     const { data, error: signUpErr } = await supabase.auth.signUp({ email:form.email, password:form.password });
     if (signUpErr) { setError(signUpErr.message); setLoading(false); return; }
+
     if (data.user) {
-      await supabase.from('profiles').insert({ id:data.user.id, nama:form.nama.trim(), jabatan:form.jabatan.trim(), role:form.role });
-      await supabase.from('settings').insert({
-        auth_user_id:data.user.id, nama:form.nama.trim(), jabatan:form.jabatan.trim(),
-        target_task:8, target_jam:8,
+      // Insert profile — policies allow this even without active session
+      await supabase.from('profiles').insert({
+        id: data.user.id,
+        nama: form.nama.trim(),
+        jabatan: form.jabatan.trim(),
+        role: form.role,
       });
+      // Settings row is created by loadAll on first login — no insert here
+      // (settings RLS requires active auth session which may not exist yet if email confirmation is on)
+
+      if (!data.session) {
+        // Email confirmation is required — tell user to check their inbox
+        setNeedsConfirm(true);
+      }
+      // If data.session is set, onAuthStateChange in App() fires automatically → no action needed
     }
     setLoading(false);
   };
+
+  if (needsConfirm) {
+    return (
+      <div className="auth-bg">
+        <div className="auth-card">
+          <div className="auth-logo-row">
+            <div className="sb-logo" style={{ width:38, height:38, borderRadius:10, fontSize:16 }}><Briefcase size={18} strokeWidth={2}/></div>
+          </div>
+          <div className="auth-title" style={{ textAlign:'center', marginBottom:8 }}>Cek Email Kamu!</div>
+          <div className="auth-subtitle" style={{ marginBottom:20 }}>
+            Link konfirmasi telah dikirim ke <b>{form.email}</b>.<br/>
+            Buka email dan klik link untuk mengaktifkan akun, lalu login.
+          </div>
+          <button className="auth-submit-btn" onClick={onSwitch}>Pergi ke halaman Login</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="auth-bg">
@@ -1357,34 +1414,42 @@ function RegisterPage({ onSwitch }:{ onSwitch:()=>void }) {
         <form onSubmit={handleSubmit} className="auth-form">
           <div className="auth-row2">
             <div>
-              <label className="sf-label">Nama Lengkap</label>
-              <input className="sf-input" placeholder="Nama lengkap" value={form.nama}
+              <label>Nama Lengkap</label>
+              <input placeholder="Nama lengkap" value={form.nama}
                 onChange={e=>set('nama',e.target.value)} required autoFocus/>
             </div>
             <div>
-              <label className="sf-label">Jabatan</label>
-              <input className="sf-input" placeholder="Jabatan / posisi" value={form.jabatan}
+              <label>Jabatan</label>
+              <input placeholder="Jabatan / posisi" value={form.jabatan}
                 onChange={e=>set('jabatan',e.target.value)}/>
             </div>
           </div>
-          <label className="sf-label">Role</label>
-          <select className="sf-input" value={form.role} onChange={e=>set('role',e.target.value)}>
-            <option value="staff">Staff</option>
-            <option value="atasan">Atasan</option>
-          </select>
-          <label className="sf-label">Email</label>
-          <input type="email" className="sf-input" placeholder="nama@email.com" value={form.email}
-            onChange={e=>set('email',e.target.value)} required/>
+          <label>
+            Role
+            <select value={form.role} onChange={e=>set('role', e.target.value as 'staff'|'atasan')}>
+              <option value="staff">Staff</option>
+              <option value="atasan">Atasan</option>
+            </select>
+          </label>
+          <label>
+            Email
+            <input type="email" placeholder="nama@email.com" value={form.email}
+              onChange={e=>set('email',e.target.value)} required/>
+          </label>
           <div className="auth-row2">
             <div>
-              <label className="sf-label">Password</label>
-              <input type="password" className="sf-input" placeholder="Min. 6 karakter" value={form.password}
-                onChange={e=>set('password',e.target.value)} required/>
+              <label>
+                Password
+                <input type="password" placeholder="Min. 6 karakter" value={form.password}
+                  onChange={e=>set('password',e.target.value)} required/>
+              </label>
             </div>
             <div>
-              <label className="sf-label">Konfirmasi Password</label>
-              <input type="password" className="sf-input" placeholder="Ulangi password" value={form.confirm}
-                onChange={e=>set('confirm',e.target.value)} required/>
+              <label>
+                Konfirmasi Password
+                <input type="password" placeholder="Ulangi password" value={form.confirm}
+                  onChange={e=>set('confirm',e.target.value)} required/>
+              </label>
             </div>
           </div>
           {error && <div className="auth-error">{error}</div>}
@@ -1508,10 +1573,11 @@ export default function App() {
     return () => { alive = false; subscription.unsubscribe(); };
   }, []);
 
-  /* ── Load profile after auth ───────────────────────────────────────── */
+  /* ── Load profile, then data — sequentially after auth ────────────── */
   useEffect(() => {
     if (!myUserId) return;
     (async () => {
+      // 1. Load profile
       const { data: prof } = await supabase.from('profiles').select('*').eq('id', myUserId).maybeSingle();
       if (prof) {
         setProfile(prof as Profile);
@@ -1521,52 +1587,67 @@ export default function App() {
           setAllStaff((staff ?? []) as StaffMember[]);
         }
       }
+      // 2. Load own data (profile is now known)
+      await loadAll(myUserId);
       setAuthLoading(false);
     })();
   }, [myUserId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Load data when target user changes ───────────────────────────── */
+  /* ── Reload data when atasan switches to view a different staff ─────── */
   useEffect(() => {
-    if (targetUid) loadAll(targetUid);
-  }, [targetUid]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (viewingUserId && viewingUserId !== myUserId) {
+      loadAll(viewingUserId);
+    } else if (viewingUserId === null && myUserId) {
+      // Switched back to own data
+      loadAll(myUserId);
+    }
+  }, [viewingUserId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Supabase helpers (use auth_user_id) ───────────────────────────── */
+  // Use getSession() inside each IIFE so auth_user_id is always fresh, never stale closure.
   const syncTasks = (date: string, tasks: Task[]) => {
-    if (!myUserId) return;
     (async () => {
-      await supabase.from('tasks').delete().eq('auth_user_id', myUserId).eq('date', date);
+      const { data: { session } } = await supabase.auth.getSession();
+      const curUid = session?.user?.id;
+      if (!curUid) return;
+      await supabase.from('tasks').delete().eq('auth_user_id', curUid).eq('date', date);
       if (tasks.length)
         await supabase.from('tasks').insert(
-          tasks.map(t => ({ id:t.id, auth_user_id:myUserId, date, text:t.text, done:t.done, priority:t.priority, status:t.status }))
+          tasks.map(t => ({ id:t.id, auth_user_id:curUid, date, text:t.text, done:t.done, priority:t.priority, status:t.status }))
         );
     })().catch(console.error);
   };
 
   const syncTimeline = (date: string, timeline: TLItem[]) => {
-    if (!myUserId) return;
     (async () => {
-      await supabase.from('timeline').delete().eq('auth_user_id', myUserId).eq('date', date);
+      const { data: { session } } = await supabase.auth.getSession();
+      const curUid = session?.user?.id;
+      if (!curUid) return;
+      await supabase.from('timeline').delete().eq('auth_user_id', curUid).eq('date', date);
       if (timeline.length)
         await supabase.from('timeline').insert(
-          timeline.map(tl => ({ id:tl.id, auth_user_id:myUserId, date, time:tl.time, title:tl.activity, status:tl.category }))
+          timeline.map(tl => ({ id:tl.id, auth_user_id:curUid, date, time:tl.time, title:tl.activity, status:tl.category }))
         );
     })().catch(console.error);
   };
 
   const syncNotes = (date: string, content: string) => {
-    if (!myUserId) return;
     (async () => {
-      const { data } = await supabase.from('notes').select('id').eq('auth_user_id', myUserId).eq('date', date).maybeSingle();
+      const { data: { session } } = await supabase.auth.getSession();
+      const curUid = session?.user?.id;
+      if (!curUid) return;
+      const { data } = await supabase.from('notes').select('id').eq('auth_user_id', curUid).eq('date', date).maybeSingle();
       if (data)
         await supabase.from('notes').update({ content, updated_at: new Date().toISOString() }).eq('id', data.id);
       else
-        await supabase.from('notes').insert({ auth_user_id:myUserId, date, content });
+        await supabase.from('notes').insert({ auth_user_id:curUid, date, content });
     })().catch(console.error);
   };
 
   /* ── Initial load from Supabase ────────────────────────────────────── */
   const loadAll = async (uid: string) => {
     setLoading(true); setCloudErr(null);
+    const isOwnData = uid === myUserId;
     try {
       const [tasksRes, tlRes, notesRes, projRes, blockRes, settRes] = await Promise.all([
         supabase.from('tasks').select('*').eq('auth_user_id', uid),
@@ -1577,14 +1658,17 @@ export default function App() {
         supabase.from('settings').select('*').eq('auth_user_id', uid).maybeSingle(),
       ]);
 
-      if (tasksRes.error || tlRes.error || notesRes.error || projRes.error || blockRes.error)
-        throw new Error('Query error');
+      if (tasksRes.error || tlRes.error || notesRes.error || projRes.error || blockRes.error) {
+        const errMsg = tasksRes.error?.message || tlRes.error?.message || 'Query error';
+        throw new Error(errMsg);
+      }
 
+      const today = todayStr();
       const allDates = new Set<string>([
         ...(tasksRes.data?.map(t => t.date) ?? []),
         ...(tlRes.data?.map(t => t.date) ?? []),
         ...(notesRes.data?.map(n => n.date) ?? []),
-        todayStr(),
+        ...(isOwnData ? [today] : []),   // guarantee today entry only for own data
       ]);
       const getLocal = (d: string) => { try { return JSON.parse(localStorage.getItem(`scm_local_${uid}_${d}`) || '{}'); } catch { return {}; } };
 
@@ -1606,35 +1690,52 @@ export default function App() {
         };
       });
       setEntries(builtEntries);
+      // Persist own data to localStorage so fallback works on next refresh
+      if (isOwnData) persist('scm_entries', builtEntries);
 
       const storedColors = load<Record<string,string>>('scm_proj_colors', {});
-      setProjects((projRes.data ?? []).map((p,i) => ({
+      const builtProjects: Project[] = (projRes.data ?? []).map((p,i) => ({
         id:p.id, name:p.name, progress:p.progress, status:p.status as Project['status'],
         color: storedColors[p.id] ?? PROJ_PALETTE[i % PROJ_PALETTE.length],
-      })));
+      }));
+      setProjects(builtProjects);
+      if (isOwnData) persist('scm_projects', builtProjects);
 
-      setBlockers((blockRes.data ?? []).map(b => ({
+      const builtBlockers: Blocker[] = (blockRes.data ?? []).map(b => ({
         id:b.id, title:b.title, dampak:b.dampak??'',
         priority:b.priority as Blocker['priority'], resolved:b.resolved,
-        date: b.created_at ? (b.created_at as string).slice(0,10) : todayStr(),
-      })));
+        date: b.created_at ? (b.created_at as string).slice(0,10) : today,
+      }));
+      setBlockers(builtBlockers);
+      if (isOwnData) persist('scm_blockers', builtBlockers);
 
       if (settRes.data) {
-        setSettings({ nama:settRes.data.nama, jabatan:settRes.data.jabatan, targetTask:settRes.data.target_task, targetJam:settRes.data.target_jam });
-      } else if (uid === myUserId) {
-        // First login: insert default settings
-        await supabase.from('settings').insert({
-          auth_user_id:uid, nama:profile?.nama??'', jabatan:profile?.jabatan??'', target_task:8, target_jam:8,
-        });
+        const s: AppSettings = { nama:settRes.data.nama, jabatan:settRes.data.jabatan, targetTask:settRes.data.target_task, targetJam:settRes.data.target_jam };
+        setSettings(s);
+        if (isOwnData) persist('scm_settings', s);
+      } else if (isOwnData) {
+        // First login: insert default settings row using fresh session
+        const { data: { session } } = await supabase.auth.getSession();
+        const freshUid = session?.user?.id;
+        if (freshUid) {
+          await supabase.from('settings').insert({
+            auth_user_id: freshUid,
+            nama: (await supabase.from('profiles').select('nama,jabatan').eq('id', freshUid).maybeSingle()).data?.nama ?? '',
+            jabatan: (await supabase.from('profiles').select('jabatan').eq('id', freshUid).maybeSingle()).data?.jabatan ?? '',
+            target_task: 8, target_jam: 8,
+          });
+        }
       }
     } catch (err) {
       console.error('Supabase load failed:', err);
       setCloudErr('Tidak dapat terhubung ke cloud. Menggunakan data lokal.');
-      const saved = load<Entry[]>('scm_entries', []);
-      setEntries(saved.some(e=>e.date===todayStr()) ? saved : [emptyEntry(), ...saved]);
-      setProjects(load<Project[]>('scm_projects', []));
-      setBlockers(load<Blocker[]>('scm_blockers', []));
-      setSettings(load<AppSettings>('scm_settings', DEFAULT_SETTINGS));
+      if (isOwnData) {
+        const saved = load<Entry[]>('scm_entries', []);
+        setEntries(saved.some(e=>e.date===todayStr()) ? saved : [emptyEntry(), ...saved]);
+        setProjects(load<Project[]>('scm_projects', []));
+        setBlockers(load<Blocker[]>('scm_blockers', []));
+        setSettings(load<AppSettings>('scm_settings', DEFAULT_SETTINGS));
+      }
     } finally {
       setLoading(false);
     }
@@ -1642,7 +1743,12 @@ export default function App() {
 
   /* ── Entry mutations ───────────────────────────────────────────────── */
   const updateEntry = (date: string, patch: Partial<Entry>) => {
-    setEntries(prev => prev.map(e => e.date===date ? { ...e, ...patch } : e));
+    setEntries(prev => {
+      const updated = prev.map(e => e.date===date ? { ...e, ...patch } : e);
+      // Always backup own entries to localStorage so data survives refresh if Supabase sync is slow
+      if (!viewingUserId || viewingUserId === myUserId) persist('scm_entries', updated);
+      return updated;
+    });
     if ('tasks'    in patch && patch.tasks    !== undefined) syncTasks(date, patch.tasks);
     if ('timeline' in patch && patch.timeline !== undefined) syncTimeline(date, patch.timeline);
     if ('notes'    in patch)                                  syncNotes(date, patch.notes ?? '');
