@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Background rounded square -->
+  <rect width="32" height="32" rx="7" fill="#C2185B"/>
+  <!-- Journal/book body -->
+  <rect x="8" y="6" width="16" height="20" rx="2" fill="white"/>
+  <!-- Spine line -->
+  <rect x="8" y="6" width="3" height="20" rx="1" fill="rgba(194,24,91,0.25)"/>
+  <!-- Checklist lines -->
+  <!-- Row 1: checkbox checked -->
+  <rect x="13" y="11" width="3" height="3" rx="0.8" fill="none" stroke="#C2185B" stroke-width="1.2"/>
+  <polyline points="13.6,12.5 14.4,13.3 15.4,11.7" stroke="#C2185B" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="17.5" y="12" width="4.5" height="1" rx="0.5" fill="#C2185B" opacity="0.5"/>
+  <!-- Row 2: checkbox unchecked -->
+  <rect x="13" y="15.5" width="3" height="3" rx="0.8" fill="none" stroke="#C2185B" stroke-width="1.2"/>
+  <rect x="17.5" y="16.5" width="4.5" height="1" rx="0.5" fill="#C2185B" opacity="0.3"/>
+  <!-- Row 3: short line -->
+  <rect x="13" y="20.5" width="9" height="1" rx="0.5" fill="#C2185B" opacity="0.2"/>
+</svg>
