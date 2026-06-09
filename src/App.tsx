@@ -9,11 +9,12 @@ import { Chart, registerables } from 'chart.js';
 import {
   LayoutDashboard, CalendarCheck, TrendingUp, Clock,
   Folder, BarChart2, AlertTriangle, Settings,
-  ChevronDown, ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight,
   Plus, X, FileText, Briefcase,
   CheckCircle2, Circle, Target, Calendar, SquareCheck,
   Smile, Meh, Frown, Zap, Activity, Coffee, Code,
   Pencil, Check, WifiOff, RefreshCw,
+  LogOut, Users, Eye,
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import './App.css';
@@ -28,14 +29,42 @@ if (!localStorage.getItem('scm_v2_clean')) {
   localStorage.setItem('scm_v2_clean', '1');
 }
 
-/* ── Stable user identity (persisted in localStorage) ────────────────── */
-const USER_ID: string = (() => {
-  const stored = localStorage.getItem('scm_user_id');
-  if (stored) return stored;
-  const id = crypto.randomUUID();
-  localStorage.setItem('scm_user_id', id);
-  return id;
-})();
+/*
+ * ── SQL: jalankan di Supabase SQL Editor ────────────────────────────────
+ *
+ * CREATE TABLE IF NOT EXISTS profiles (
+ *   id uuid REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
+ *   nama text NOT NULL,
+ *   jabatan text,
+ *   role text DEFAULT 'staff' CHECK (role IN ('staff', 'atasan')),
+ *   created_at timestamp DEFAULT now()
+ * );
+ *
+ * ALTER TABLE tasks     ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
+ * ALTER TABLE projects  ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
+ * ALTER TABLE blockers  ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
+ * ALTER TABLE timeline  ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
+ * ALTER TABLE notes     ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
+ * ALTER TABLE settings  ADD COLUMN IF NOT EXISTS auth_user_id uuid REFERENCES auth.users(id);
+ *
+ * ALTER TABLE tasks     ENABLE ROW LEVEL SECURITY;
+ * ALTER TABLE projects  ENABLE ROW LEVEL SECURITY;
+ * ALTER TABLE blockers  ENABLE ROW LEVEL SECURITY;
+ * ALTER TABLE timeline  ENABLE ROW LEVEL SECURITY;
+ * ALTER TABLE notes     ENABLE ROW LEVEL SECURITY;
+ * ALTER TABLE settings  ENABLE ROW LEVEL SECURITY;
+ * ALTER TABLE profiles  ENABLE ROW LEVEL SECURITY;
+ *
+ * CREATE POLICY "staff_own_tasks"     ON tasks     FOR ALL USING (auth.uid() = auth_user_id);
+ * CREATE POLICY "staff_own_projects"  ON projects  FOR ALL USING (auth.uid() = auth_user_id);
+ * CREATE POLICY "staff_own_blockers"  ON blockers  FOR ALL USING (auth.uid() = auth_user_id);
+ * CREATE POLICY "staff_own_timeline"  ON timeline  FOR ALL USING (auth.uid() = auth_user_id);
+ * CREATE POLICY "staff_own_notes"     ON notes     FOR ALL USING (auth.uid() = auth_user_id);
+ * CREATE POLICY "staff_own_settings"  ON settings  FOR ALL USING (auth.uid() = auth_user_id);
+ * CREATE POLICY "profiles_policy"     ON profiles  FOR ALL USING (true);
+ *
+ * ────────────────────────────────────────────────────────────────────────
+ */
 
 /* ── Project accent colors (not stored in DB) ─────────────────────────── */
 const PROJ_PALETTE = ['#C2185B','#7C6FF7','#4ECBA4','#F5A623','#F06060','#4FC3F7','#9575CD','#26A69A'];
@@ -50,12 +79,14 @@ type Mood       = 'berat'  | 'biasa'  | 'oke'    | 'produktif';
 type TaskStatus = 'selesai'| 'on_progress' | 'belum_mulai';
 type View = 'dashboard'|'dailyplan'|'progress'|'timeline'|'projects'|'weekly'|'reports'|'calendar'|'blockers'|'settings';
 
-interface Task    { id:string; text:string; done:boolean; priority:Priority; status:TaskStatus; }
-interface TLItem  { id:string; time:string; activity:string; category:'meeting'|'coding'|'review'|'other'; }
-interface Entry   { id:string; date:string; title:string; notes:string; mood:Mood|null; tasks:Task[]; jamKerja:number; timeline:TLItem[]; }
-interface Project { id:string; name:string; progress:number; status:'active'|'completed'|'on_hold'; color:string; }
-interface Blocker { id:string; title:string; dampak:string; priority:'high'|'medium'|'low'; resolved:boolean; date:string; }
+interface Task        { id:string; text:string; done:boolean; priority:Priority; status:TaskStatus; }
+interface TLItem      { id:string; time:string; activity:string; category:'meeting'|'coding'|'review'|'other'; }
+interface Entry       { id:string; date:string; title:string; notes:string; mood:Mood|null; tasks:Task[]; jamKerja:number; timeline:TLItem[]; }
+interface Project     { id:string; name:string; progress:number; status:'active'|'completed'|'on_hold'; color:string; }
+interface Blocker     { id:string; title:string; dampak:string; priority:'high'|'medium'|'low'; resolved:boolean; date:string; }
 interface AppSettings { nama:string; jabatan:string; targetTask:number; targetJam:number; }
+interface Profile     { id:string; nama:string; jabatan:string; role:'staff'|'atasan'; }
+interface StaffMember { id:string; nama:string; jabatan:string; }
 
 /* ── Constants ────────────────────────────────────────────────────────── */
 const MOODS = [
@@ -86,7 +117,7 @@ function load<T>(key:string, fallback:T):T {
 const persist = <T,>(key:string, v:T) => localStorage.setItem(key, JSON.stringify(v));
 
 /* ── Default data (NO dummy data) ─────────────────────────────────────── */
-const DEFAULT_SETTINGS:AppSettings = { nama:'Arian Firmansyah', jabatan:'Supply Chain Excellence', targetTask:8, targetJam:8 };
+const DEFAULT_SETTINGS:AppSettings = { nama:'', jabatan:'', targetTask:8, targetJam:8 };
 
 function emptyEntry():Entry {
   return {
@@ -254,9 +285,12 @@ function DatePickerDropdown({ selectedDate, entries, onSelect }:{
 }
 
 /* ── Dashboard ────────────────────────────────────────────────────────── */
-function Dashboard({ entries, projects, blockers, settings, onToggleTask, onUpdateEntry, onSetView }:{
+function Dashboard({ entries, projects, blockers, settings, onToggleTask, onUpdateEntry, onSetView,
+  profile, allStaff, viewingUserId, myUserId, onChangeViewingUser, isReadOnly }:{
   entries:Entry[]; projects:Project[]; blockers:Blocker[]; settings:AppSettings;
   onToggleTask:(id:string)=>void; onUpdateEntry:(p:Partial<Entry>)=>void; onSetView:(v:View)=>void;
+  profile:Profile|null; allStaff:StaffMember[]; viewingUserId:string; myUserId:string;
+  onChangeViewingUser:(uid:string)=>void; isReadOnly:boolean;
 }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [showPicker,   setShowPicker]   = useState(false);
@@ -302,15 +336,27 @@ function Dashboard({ entries, projects, blockers, settings, onToggleTask, onUpda
     <div className="dash-wrap">
       <div className="dash-topbar">
         <div>
-          <h1 className="dash-greeting">{greeting()}, <span>{(settings.nama||'Pengguna').split(' ')[0]}</span>!</h1>
+          <h1 className="dash-greeting">{greeting()}, <span>{(profile?.nama||settings.nama||'Pengguna').split(' ')[0]}</span>!</h1>
           <p className="dash-date">
-            {isViewingToday
-              ? format(new Date(),'EEEE, d MMMM yyyy',{ locale:id })
-              : <span className="dp-viewing-badge">Menampilkan: {format(parseISO(selectedDate),'EEEE, d MMMM yyyy',{ locale:id })}</span>
+            {isReadOnly
+              ? <span className="dp-viewing-badge"><Eye size={11}/> Melihat jurnal: <b>{allStaff.find(s=>s.id===viewingUserId)?.nama||'Staff'}</b> · Read-only</span>
+              : isViewingToday
+                ? format(new Date(),'EEEE, d MMMM yyyy',{ locale:id })
+                : <span className="dp-viewing-badge">Menampilkan: {format(parseISO(selectedDate),'EEEE, d MMMM yyyy',{ locale:id })}</span>
             }
           </p>
         </div>
         <div className="dash-topbar-right">
+          {profile?.role === 'atasan' && (
+            <div className="atasan-selector-wrap">
+              <Users size={12} style={{ color:'var(--text-muted)', flexShrink:0 }}/>
+              <select className="atasan-select" value={viewingUserId}
+                onChange={e=>onChangeViewingUser(e.target.value)}>
+                <option value={myUserId}>Jurnal Saya</option>
+                {allStaff.map(s=><option key={s.id} value={s.id}>{s.nama}</option>)}
+              </select>
+            </div>
+          )}
           <div className="date-picker-wrap" ref={pickerRef}>
             <button
               className={`btn-outline${showPicker?' dp-btn-active':''}`}
@@ -334,7 +380,7 @@ function Dashboard({ entries, projects, blockers, settings, onToggleTask, onUpda
               />
             )}
           </div>
-          <button className="btn-accent-main" onClick={()=>onSetView('dailyplan')}><Plus size={13}/> Add Journal</button>
+          {!isReadOnly && <button className="btn-accent-main" onClick={()=>onSetView('dailyplan')}><Plus size={13}/> Add Journal</button>}
         </div>
       </div>
 
@@ -1223,9 +1269,142 @@ function SettingsView({ settings, onSave }:{ settings:AppSettings; onSave:(s:App
   );
 }
 
+/* ── LoginPage ────────────────────────────────────────────────────────── */
+function LoginPage({ onSwitch }:{ onSwitch:()=>void }) {
+  const [email,    setEmail]    = useState('');
+  const [password, setPassword] = useState('');
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState<string|null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true); setError(null);
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    if (err) setError(err.message === 'Invalid login credentials' ? 'Email atau password salah.' : err.message);
+    setLoading(false);
+  };
+
+  return (
+    <div className="auth-bg">
+      <div className="auth-card">
+        <div className="auth-logo-row">
+          <div className="sb-logo" style={{ width:38, height:38, borderRadius:10, fontSize:16 }}><Briefcase size={18} strokeWidth={2}/></div>
+          <div>
+            <div className="auth-title">SCM Journal</div>
+            <div className="auth-subtitle">Work Journal & Progress Tracker</div>
+          </div>
+        </div>
+        <form onSubmit={handleSubmit} className="auth-form">
+          <label className="sf-label">Email</label>
+          <input type="email" className="sf-input" placeholder="nama@email.com" value={email}
+            onChange={e=>setEmail(e.target.value)} required autoFocus/>
+          <label className="sf-label">Password</label>
+          <input type="password" className="sf-input" placeholder="••••••••" value={password}
+            onChange={e=>setPassword(e.target.value)} required/>
+          {error && <div className="auth-error">{error}</div>}
+          <button type="submit" className="auth-submit-btn" disabled={loading}>
+            {loading && <span className="auth-spinner"/>}
+            {loading ? 'Masuk…' : 'Masuk'}
+          </button>
+        </form>
+        <p className="auth-switch">Belum punya akun?{' '}
+          <button className="auth-switch-link" onClick={onSwitch}>Daftar sekarang</button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ── RegisterPage ─────────────────────────────────────────────────────── */
+function RegisterPage({ onSwitch }:{ onSwitch:()=>void }) {
+  const [form, setForm] = useState({
+    nama:'', jabatan:'', email:'', password:'', confirm:'',
+    role:'staff' as 'staff'|'atasan',
+  });
+  const [loading, setLoading]  = useState(false);
+  const [error,   setError]    = useState<string|null>(null);
+  const set = (k: keyof typeof form, v: string) => setForm(prev => ({ ...prev, [k]:v }));
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (!form.nama.trim())              { setError('Nama lengkap wajib diisi.'); return; }
+    if (form.password.length < 6)      { setError('Password minimal 6 karakter.'); return; }
+    if (form.password !== form.confirm) { setError('Konfirmasi password tidak cocok.'); return; }
+    setLoading(true);
+    const { data, error: signUpErr } = await supabase.auth.signUp({ email:form.email, password:form.password });
+    if (signUpErr) { setError(signUpErr.message); setLoading(false); return; }
+    if (data.user) {
+      await supabase.from('profiles').insert({ id:data.user.id, nama:form.nama.trim(), jabatan:form.jabatan.trim(), role:form.role });
+      await supabase.from('settings').insert({
+        auth_user_id:data.user.id, nama:form.nama.trim(), jabatan:form.jabatan.trim(),
+        target_task:8, target_jam:8,
+      });
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="auth-bg">
+      <div className="auth-card auth-card-wide">
+        <div className="auth-logo-row">
+          <div className="sb-logo" style={{ width:38, height:38, borderRadius:10, fontSize:16 }}><Briefcase size={18} strokeWidth={2}/></div>
+          <div>
+            <div className="auth-title">Buat Akun</div>
+            <div className="auth-subtitle">Daftar untuk mulai mencatat</div>
+          </div>
+        </div>
+        <form onSubmit={handleSubmit} className="auth-form">
+          <div className="auth-row2">
+            <div>
+              <label className="sf-label">Nama Lengkap</label>
+              <input className="sf-input" placeholder="Nama lengkap" value={form.nama}
+                onChange={e=>set('nama',e.target.value)} required autoFocus/>
+            </div>
+            <div>
+              <label className="sf-label">Jabatan</label>
+              <input className="sf-input" placeholder="Jabatan / posisi" value={form.jabatan}
+                onChange={e=>set('jabatan',e.target.value)}/>
+            </div>
+          </div>
+          <label className="sf-label">Role</label>
+          <select className="sf-input" value={form.role} onChange={e=>set('role',e.target.value)}>
+            <option value="staff">Staff</option>
+            <option value="atasan">Atasan</option>
+          </select>
+          <label className="sf-label">Email</label>
+          <input type="email" className="sf-input" placeholder="nama@email.com" value={form.email}
+            onChange={e=>set('email',e.target.value)} required/>
+          <div className="auth-row2">
+            <div>
+              <label className="sf-label">Password</label>
+              <input type="password" className="sf-input" placeholder="Min. 6 karakter" value={form.password}
+                onChange={e=>set('password',e.target.value)} required/>
+            </div>
+            <div>
+              <label className="sf-label">Konfirmasi Password</label>
+              <input type="password" className="sf-input" placeholder="Ulangi password" value={form.confirm}
+                onChange={e=>set('confirm',e.target.value)} required/>
+            </div>
+          </div>
+          {error && <div className="auth-error">{error}</div>}
+          <button type="submit" className="auth-submit-btn" disabled={loading}>
+            {loading && <span className="auth-spinner"/>}
+            {loading ? 'Mendaftar…' : 'Daftar'}
+          </button>
+        </form>
+        <p className="auth-switch">Sudah punya akun?{' '}
+          <button className="auth-switch-link" onClick={onSwitch}>Masuk</button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /* ── Sidebar ──────────────────────────────────────────────────────────── */
-function Sidebar({ view, setView, settings, activeBlockers }:{
+function Sidebar({ view, setView, settings, activeBlockers, profile, onLogout }:{
   view:View; setView:(v:View)=>void; settings:AppSettings; activeBlockers:number;
+  profile:Profile|null; onLogout:()=>void;
 }) {
   const NAV = [
     { section:'MAIN', items:[
@@ -1245,6 +1424,10 @@ function Sidebar({ view, setView, settings, activeBlockers }:{
       { key:'settings'  as View, icon:Settings,      label:'Settings', badge:undefined },
     ]},
   ];
+
+  const displayName = profile?.nama || settings.nama || 'Pengguna';
+  const displayRole = profile?.jabatan || settings.jabatan || '—';
+  const isAtasan    = profile?.role === 'atasan';
 
   return (
     <aside className="sidebar">
@@ -1267,165 +1450,188 @@ function Sidebar({ view, setView, settings, activeBlockers }:{
         ))}
       </nav>
       <div className="sb-user">
-        <div className="sb-avatar">{initials(settings.nama)}</div>
+        <div className="sb-avatar">{initials(displayName)}</div>
         <div className="sb-user-info">
-          <div className="sb-user-name">{settings.nama||'Pengguna'}</div>
-          <div className="sb-user-role">{settings.jabatan||'—'}</div>
+          <div className="sb-user-name">{displayName}</div>
+          <div className="sb-user-role">{displayRole}</div>
+          <span className={`sb-role-badge${isAtasan?' sb-role-atasan':''}`}>
+            {isAtasan ? '★ ATASAN' : 'STAFF'}
+          </span>
         </div>
-        <ChevronDown size={13} className="sb-chevron"/>
       </div>
+      <button className="sb-logout-btn" onClick={onLogout}>
+        <LogOut size={13}/> Keluar
+      </button>
     </aside>
   );
 }
 
 /* ── App (root) ───────────────────────────────────────────────────────── */
 export default function App() {
-  const [view,     setView]     = useState<View>('dashboard');
-  const [loading,  setLoading]  = useState(true);
-  const [cloudErr, setCloudErr] = useState<string|null>(null);
+  /* Auth state */
+  const [authUser,   setAuthUser]   = useState<any>(null);
+  const [profile,    setProfile]    = useState<Profile|null>(null);
+  const [authLoading,setAuthLoading]= useState(true);
+  const [authPage,   setAuthPage]   = useState<'login'|'register'>('login');
 
+  /* Atasan state */
+  const [allStaff,       setAllStaff]       = useState<StaffMember[]>([]);
+  const [viewingUserId,  setViewingUserId]  = useState<string|null>(null);
+
+  /* Data & UI state */
+  const [view,     setView]     = useState<View>('dashboard');
+  const [loading,  setLoading]  = useState(false);
+  const [cloudErr, setCloudErr] = useState<string|null>(null);
   const [entries,  setEntries]  = useState<Entry[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [blockers, setBlockers] = useState<Blocker[]>([]);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  /* ── Supabase helpers ──────────────────────────────────────────────── */
+  const myUserId    = authUser?.id as string | undefined;
+  const targetUid   = viewingUserId ?? myUserId;               // whose data we display
+  const isReadOnly  = !!(viewingUserId && viewingUserId !== myUserId);
 
-  /** Sync an entry's tasks to Supabase (delete-then-insert for simplicity). */
+  /* ── Auth initialization ───────────────────────────────────────────── */
+  useEffect(() => {
+    let alive = true;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!alive) return;
+      setAuthUser(session?.user ?? null);
+      if (!session?.user) setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_ev, session) => {
+      if (!alive) return;
+      const u = session?.user ?? null;
+      setAuthUser(u);
+      if (!u) { setAuthLoading(false); setProfile(null); setViewingUserId(null); }
+    });
+    return () => { alive = false; subscription.unsubscribe(); };
+  }, []);
+
+  /* ── Load profile after auth ───────────────────────────────────────── */
+  useEffect(() => {
+    if (!myUserId) return;
+    (async () => {
+      const { data: prof } = await supabase.from('profiles').select('*').eq('id', myUserId).maybeSingle();
+      if (prof) {
+        setProfile(prof as Profile);
+        setSettings(s => ({ ...s, nama: prof.nama, jabatan: prof.jabatan ?? s.jabatan }));
+        if (prof.role === 'atasan') {
+          const { data: staff } = await supabase.from('profiles').select('id, nama, jabatan').neq('id', myUserId);
+          setAllStaff((staff ?? []) as StaffMember[]);
+        }
+      }
+      setAuthLoading(false);
+    })();
+  }, [myUserId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── Load data when target user changes ───────────────────────────── */
+  useEffect(() => {
+    if (targetUid) loadAll(targetUid);
+  }, [targetUid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── Supabase helpers (use auth_user_id) ───────────────────────────── */
   const syncTasks = (date: string, tasks: Task[]) => {
+    if (!myUserId) return;
     (async () => {
-      await supabase.from('tasks').delete().eq('user_id', USER_ID).eq('date', date);
-      if (tasks.length) {
+      await supabase.from('tasks').delete().eq('auth_user_id', myUserId).eq('date', date);
+      if (tasks.length)
         await supabase.from('tasks').insert(
-          tasks.map(t => ({ id:t.id, user_id:USER_ID, date, text:t.text, done:t.done, priority:t.priority, status:t.status }))
+          tasks.map(t => ({ id:t.id, auth_user_id:myUserId, date, text:t.text, done:t.done, priority:t.priority, status:t.status }))
         );
-      }
     })().catch(console.error);
   };
 
-  /** Sync an entry's timeline to Supabase. DB uses title/status for activity/category. */
   const syncTimeline = (date: string, timeline: TLItem[]) => {
+    if (!myUserId) return;
     (async () => {
-      await supabase.from('timeline').delete().eq('user_id', USER_ID).eq('date', date);
-      if (timeline.length) {
+      await supabase.from('timeline').delete().eq('auth_user_id', myUserId).eq('date', date);
+      if (timeline.length)
         await supabase.from('timeline').insert(
-          timeline.map(tl => ({ id:tl.id, user_id:USER_ID, date, time:tl.time, title:tl.activity, status:tl.category }))
+          timeline.map(tl => ({ id:tl.id, auth_user_id:myUserId, date, time:tl.time, title:tl.activity, status:tl.category }))
         );
-      }
     })().catch(console.error);
   };
 
-  /** Upsert a daily note (check-then-insert/update pattern). */
   const syncNotes = (date: string, content: string) => {
+    if (!myUserId) return;
     (async () => {
-      const { data } = await supabase.from('notes').select('id').eq('user_id', USER_ID).eq('date', date).maybeSingle();
-      if (data) {
+      const { data } = await supabase.from('notes').select('id').eq('auth_user_id', myUserId).eq('date', date).maybeSingle();
+      if (data)
         await supabase.from('notes').update({ content, updated_at: new Date().toISOString() }).eq('id', data.id);
-      } else {
-        await supabase.from('notes').insert({ user_id:USER_ID, date, content });
-      }
+      else
+        await supabase.from('notes').insert({ auth_user_id:myUserId, date, content });
     })().catch(console.error);
   };
 
   /* ── Initial load from Supabase ────────────────────────────────────── */
-  const loadAll = async () => {
-    setLoading(true);
-    setCloudErr(null);
+  const loadAll = async (uid: string) => {
+    setLoading(true); setCloudErr(null);
     try {
       const [tasksRes, tlRes, notesRes, projRes, blockRes, settRes] = await Promise.all([
-        supabase.from('tasks').select('*').eq('user_id', USER_ID),
-        supabase.from('timeline').select('*').eq('user_id', USER_ID),
-        supabase.from('notes').select('*').eq('user_id', USER_ID),
-        supabase.from('projects').select('*').eq('user_id', USER_ID),
-        supabase.from('blockers').select('*').eq('user_id', USER_ID),
-        supabase.from('settings').select('*').eq('user_id', USER_ID).maybeSingle(),
+        supabase.from('tasks').select('*').eq('auth_user_id', uid),
+        supabase.from('timeline').select('*').eq('auth_user_id', uid),
+        supabase.from('notes').select('*').eq('auth_user_id', uid),
+        supabase.from('projects').select('*').eq('auth_user_id', uid),
+        supabase.from('blockers').select('*').eq('auth_user_id', uid),
+        supabase.from('settings').select('*').eq('auth_user_id', uid).maybeSingle(),
       ]);
 
       if (tasksRes.error || tlRes.error || notesRes.error || projRes.error || blockRes.error)
         throw new Error('Query error');
 
-      /* Build Entry objects from flat tables */
       const allDates = new Set<string>([
         ...(tasksRes.data?.map(t => t.date) ?? []),
         ...(tlRes.data?.map(t => t.date) ?? []),
         ...(notesRes.data?.map(n => n.date) ?? []),
         todayStr(),
       ]);
+      const getLocal = (d: string) => { try { return JSON.parse(localStorage.getItem(`scm_local_${uid}_${d}`) || '{}'); } catch { return {}; } };
 
-      const getLocal = (date: string) => {
-        try { return JSON.parse(localStorage.getItem(`scm_local_${date}`) || '{}'); } catch { return {}; }
-      };
-
-      const builtEntries: Entry[] = Array.from(allDates)
-        .sort((a, b) => b.localeCompare(a))
-        .map(date => {
-          const local = getLocal(date);
-          return {
-            id: date,
-            date,
-            title: format(parseISO(date), 'EEEE, d MMMM yyyy', { locale:id }),
-            notes: notesRes.data?.find(n => n.date === date)?.content ?? '',
-            mood:      (local.mood      ?? null) as Mood|null,
-            jamKerja:  (local.jamKerja  ?? 0)   as number,
-            tasks: (tasksRes.data?.filter(t => t.date === date) ?? []).map(t => ({
-              id: t.id, text: t.text, done: t.done,
-              priority: t.priority as Priority, status: t.status as TaskStatus,
-            })),
-            timeline: (tlRes.data?.filter(tl => tl.date === date) ?? [])
-              .sort((a, b) => (a.time as string).localeCompare(b.time as string))
-              .map(tl => ({
-                id: tl.id, time: tl.time,
-                activity: tl.title,
-                category: tl.status as TLItem['category'],
-              })),
-          };
-        });
-      setEntries(builtEntries);
-      persist('scm_entries', builtEntries);
-
-      /* Projects — color stored in localStorage since DB has no color column */
-      const storedColors = load<Record<string, string>>('scm_proj_colors', {});
-      const builtProjects: Project[] = (projRes.data ?? []).map((p, i) => ({
-        id: p.id, name: p.name, progress: p.progress,
-        status: p.status as Project['status'],
-        color: storedColors[p.id] ?? PROJ_PALETTE[i % PROJ_PALETTE.length],
-      }));
-      setProjects(builtProjects);
-      persist('scm_projects', builtProjects);
-
-      /* Blockers — date derived from created_at since DB has no date column */
-      const builtBlockers: Blocker[] = (blockRes.data ?? []).map(b => ({
-        id: b.id, title: b.title, dampak: b.dampak ?? '',
-        priority: b.priority as Blocker['priority'], resolved: b.resolved,
-        date: b.created_at ? (b.created_at as string).slice(0, 10) : todayStr(),
-      }));
-      setBlockers(builtBlockers);
-      persist('scm_blockers', builtBlockers);
-
-      /* Settings — upsert defaults on first use */
-      if (settRes.data) {
-        const s: AppSettings = {
-          nama: settRes.data.nama, jabatan: settRes.data.jabatan,
-          targetTask: settRes.data.target_task, targetJam: settRes.data.target_jam,
+      const builtEntries: Entry[] = Array.from(allDates).sort((a,b)=>b.localeCompare(a)).map(date => {
+        const local = getLocal(date);
+        return {
+          id: date, date,
+          title: format(parseISO(date), 'EEEE, d MMMM yyyy', { locale:id }),
+          notes: notesRes.data?.find(n => n.date===date)?.content ?? '',
+          mood:     (local.mood     ?? null) as Mood|null,
+          jamKerja: (local.jamKerja ?? 0)   as number,
+          tasks: (tasksRes.data?.filter(t => t.date===date) ?? []).map(t => ({
+            id:t.id, text:t.text, done:t.done,
+            priority:t.priority as Priority, status:t.status as TaskStatus,
+          })),
+          timeline: (tlRes.data?.filter(tl => tl.date===date) ?? [])
+            .sort((a,b)=>(a.time as string).localeCompare(b.time as string))
+            .map(tl => ({ id:tl.id, time:tl.time, activity:tl.title, category:tl.status as TLItem['category'] })),
         };
-        setSettings(s);
-        persist('scm_settings', s);
-      } else {
-        await supabase.from('settings').insert({
-          user_id: USER_ID,
-          nama:        DEFAULT_SETTINGS.nama,
-          jabatan:     DEFAULT_SETTINGS.jabatan,
-          target_task: DEFAULT_SETTINGS.targetTask,
-          target_jam:  DEFAULT_SETTINGS.targetJam,
-        });
-        setSettings(DEFAULT_SETTINGS);
-      }
+      });
+      setEntries(builtEntries);
 
+      const storedColors = load<Record<string,string>>('scm_proj_colors', {});
+      setProjects((projRes.data ?? []).map((p,i) => ({
+        id:p.id, name:p.name, progress:p.progress, status:p.status as Project['status'],
+        color: storedColors[p.id] ?? PROJ_PALETTE[i % PROJ_PALETTE.length],
+      })));
+
+      setBlockers((blockRes.data ?? []).map(b => ({
+        id:b.id, title:b.title, dampak:b.dampak??'',
+        priority:b.priority as Blocker['priority'], resolved:b.resolved,
+        date: b.created_at ? (b.created_at as string).slice(0,10) : todayStr(),
+      })));
+
+      if (settRes.data) {
+        setSettings({ nama:settRes.data.nama, jabatan:settRes.data.jabatan, targetTask:settRes.data.target_task, targetJam:settRes.data.target_jam });
+      } else if (uid === myUserId) {
+        // First login: insert default settings
+        await supabase.from('settings').insert({
+          auth_user_id:uid, nama:profile?.nama??'', jabatan:profile?.jabatan??'', target_task:8, target_jam:8,
+        });
+      }
     } catch (err) {
-      console.error('Supabase load failed — falling back to localStorage:', err);
+      console.error('Supabase load failed:', err);
       setCloudErr('Tidak dapat terhubung ke cloud. Menggunakan data lokal.');
-      const loaded = load<Entry[]>('scm_entries', []);
-      setEntries(loaded.some(e => e.date === todayStr()) ? loaded : [emptyEntry(), ...loaded]);
+      const saved = load<Entry[]>('scm_entries', []);
+      setEntries(saved.some(e=>e.date===todayStr()) ? saved : [emptyEntry(), ...saved]);
       setProjects(load<Project[]>('scm_projects', []));
       setBlockers(load<Blocker[]>('scm_blockers', []));
       setSettings(load<AppSettings>('scm_settings', DEFAULT_SETTINGS));
@@ -1434,127 +1640,131 @@ export default function App() {
     }
   };
 
-  useEffect(() => { loadAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   /* ── Entry mutations ───────────────────────────────────────────────── */
   const updateEntry = (date: string, patch: Partial<Entry>) => {
-    setEntries(prev => {
-      const updated = prev.map(e => e.date === date ? { ...e, ...patch } : e);
-      persist('scm_entries', updated);
-      return updated;
-    });
+    setEntries(prev => prev.map(e => e.date===date ? { ...e, ...patch } : e));
     if ('tasks'    in patch && patch.tasks    !== undefined) syncTasks(date, patch.tasks);
     if ('timeline' in patch && patch.timeline !== undefined) syncTimeline(date, patch.timeline);
     if ('notes'    in patch)                                  syncNotes(date, patch.notes ?? '');
-    if ('mood' in patch || 'jamKerja' in patch) {
-      const cur = entries.find(e => e.date === date);
-      localStorage.setItem(`scm_local_${date}`, JSON.stringify({
-        mood: cur?.mood ?? null, jamKerja: cur?.jamKerja ?? 0, ...patch,
-      }));
+    if (('mood' in patch || 'jamKerja' in patch) && myUserId) {
+      const cur = entries.find(e => e.date===date);
+      localStorage.setItem(`scm_local_${myUserId}_${date}`, JSON.stringify({ mood:cur?.mood??null, jamKerja:cur?.jamKerja??0, ...patch }));
     }
   };
-
-  const updateToday = (patch: Partial<Entry>) => updateEntry(todayStr(), patch);
-
+  const updateToday   = (patch: Partial<Entry>) => updateEntry(todayStr(), patch);
   const toggleTodayTask = (taskId: string) => {
-    const today = entries.find(e => e.date === todayStr());
-    if (!today) return;
-    updateToday({ tasks: today.tasks.map(t =>
-      t.id === taskId ? { ...t, done: !t.done, status: !t.done ? 'selesai' : 'belum_mulai' } : t
-    )});
+    const today = entries.find(e => e.date===todayStr()); if (!today) return;
+    updateToday({ tasks: today.tasks.map(t => t.id===taskId ? { ...t, done:!t.done, status:!t.done?'selesai':'belum_mulai' } : t) });
   };
 
   /* ── Project mutations ─────────────────────────────────────────────── */
   const addProject = (p: Project) => {
-    setProjects(prev => { const u = [...prev, p]; persist('scm_projects', u); return u; });
-    const colors = load<Record<string,string>>('scm_proj_colors', {});
-    persist('scm_proj_colors', { ...colors, [p.id]: p.color });
-    dbFire(supabase.from('projects').insert({ id:p.id, user_id:USER_ID, name:p.name, progress:p.progress, status:p.status }));
+    setProjects(prev => [...prev, p]);
+    persist('scm_proj_colors', { ...load<Record<string,string>>('scm_proj_colors',{}), [p.id]:p.color });
+    if (myUserId) dbFire(supabase.from('projects').insert({ id:p.id, auth_user_id:myUserId, name:p.name, progress:p.progress, status:p.status }));
   };
-
   const updateProject = (p: Project) => {
-    setProjects(prev => { const u = prev.map(x => x.id===p.id ? p : x); persist('scm_projects', u); return u; });
-    const colors = load<Record<string,string>>('scm_proj_colors', {});
-    persist('scm_proj_colors', { ...colors, [p.id]: p.color });
-    dbFire(supabase.from('projects').update({ name:p.name, progress:p.progress, status:p.status }).eq('id', p.id).eq('user_id', USER_ID));
+    setProjects(prev => prev.map(x => x.id===p.id ? p : x));
+    persist('scm_proj_colors', { ...load<Record<string,string>>('scm_proj_colors',{}), [p.id]:p.color });
+    if (myUserId) dbFire(supabase.from('projects').update({ name:p.name, progress:p.progress, status:p.status }).eq('id',p.id).eq('auth_user_id',myUserId));
   };
-
   const deleteProject = (id: string) => {
-    setProjects(prev => { const u = prev.filter(p => p.id!==id); persist('scm_projects', u); return u; });
-    dbFire(supabase.from('projects').delete().eq('id', id).eq('user_id', USER_ID));
+    setProjects(prev => prev.filter(p => p.id!==id));
+    if (myUserId) dbFire(supabase.from('projects').delete().eq('id',id).eq('auth_user_id',myUserId));
   };
-
   const updateProjectProgress = (id: string, progress: number) => {
-    setProjects(prev => { const u = prev.map(x => x.id===id ? { ...x, progress } : x); persist('scm_projects', u); return u; });
-    dbFire(supabase.from('projects').update({ progress }).eq('id', id).eq('user_id', USER_ID));
+    setProjects(prev => prev.map(x => x.id===id ? { ...x, progress } : x));
+    if (myUserId) dbFire(supabase.from('projects').update({ progress }).eq('id',id).eq('auth_user_id',myUserId));
   };
 
   /* ── Blocker mutations ─────────────────────────────────────────────── */
   const addBlocker = (b: Blocker) => {
-    setBlockers(prev => { const u = [...prev, b]; persist('scm_blockers', u); return u; });
-    dbFire(supabase.from('blockers').insert({ id:b.id, user_id:USER_ID, title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }));
+    setBlockers(prev => [...prev, b]);
+    if (myUserId) dbFire(supabase.from('blockers').insert({ id:b.id, auth_user_id:myUserId, title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }));
   };
-
   const resolveBlocker = (id: string) => {
-    setBlockers(prev => { const u = prev.map(b => b.id===id ? { ...b, resolved:true } : b); persist('scm_blockers', u); return u; });
-    dbFire(supabase.from('blockers').update({ resolved:true }).eq('id', id).eq('user_id', USER_ID));
+    setBlockers(prev => prev.map(b => b.id===id ? { ...b, resolved:true } : b));
+    if (myUserId) dbFire(supabase.from('blockers').update({ resolved:true }).eq('id',id).eq('auth_user_id',myUserId));
   };
-
   const deleteBlocker = (id: string) => {
-    setBlockers(prev => { const u = prev.filter(b => b.id!==id); persist('scm_blockers', u); return u; });
-    dbFire(supabase.from('blockers').delete().eq('id', id).eq('user_id', USER_ID));
+    setBlockers(prev => prev.filter(b => b.id!==id));
+    if (myUserId) dbFire(supabase.from('blockers').delete().eq('id',id).eq('auth_user_id',myUserId));
   };
-
   const updateBlocker = (b: Blocker) => {
-    setBlockers(prev => { const u = prev.map(x => x.id===b.id ? b : x); persist('scm_blockers', u); return u; });
-    dbFire(supabase.from('blockers').update({ title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }).eq('id', b.id).eq('user_id', USER_ID));
+    setBlockers(prev => prev.map(x => x.id===b.id ? b : x));
+    if (myUserId) dbFire(supabase.from('blockers').update({ title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }).eq('id',b.id).eq('auth_user_id',myUserId));
   };
 
   /* ── Settings mutation ─────────────────────────────────────────────── */
   const saveSettings = (s: AppSettings) => {
     setSettings(s);
-    persist('scm_settings', s);
-    dbFire(supabase.from('settings').update({
-      nama: s.nama, jabatan: s.jabatan,
-      target_task: s.targetTask, target_jam: s.targetJam,
-      updated_at: new Date().toISOString(),
-    }).eq('user_id', USER_ID));
+    if (myUserId) dbFire(supabase.from('settings').update({ nama:s.nama, jabatan:s.jabatan, target_task:s.targetTask, target_jam:s.targetJam, updated_at:new Date().toISOString() }).eq('auth_user_id',myUserId));
+  };
+
+  /* ── Handlers ──────────────────────────────────────────────────────── */
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setEntries([]); setProjects([]); setBlockers([]);
+    setProfile(null); setViewingUserId(null); setAllStaff([]);
+  };
+  const handleChangeViewingUser = (uid: string) => {
+    setViewingUserId(uid === myUserId ? null : uid);
   };
 
   /* ── Render ─────────────────────────────────────────────────────────── */
-  const activeBlockerCount = blockers.filter(b => !b.resolved).length;
-
-  if (loading) {
+  if (authLoading) {
     return (
-      <div className="layout">
-        <div className="loading-screen">
+      <div className="auth-bg">
+        <div className="loading-screen" style={{ background:'transparent' }}>
           <div className="loading-spinner"/>
-          <p>Memuat data dari cloud…</p>
+          <p style={{ color:'rgba(255,255,255,0.5)' }}>Memuat…</p>
         </div>
       </div>
     );
   }
 
+  if (!authUser) {
+    return authPage==='login'
+      ? <LoginPage    onSwitch={()=>setAuthPage('register')}/>
+      : <RegisterPage onSwitch={()=>setAuthPage('login')}/>;
+  }
+
+  const activeBlockerCount = blockers.filter(b => !b.resolved).length;
+  const noop = () => {};
+
   return (
     <div className="layout">
-      <Sidebar view={view} setView={setView} settings={settings} activeBlockers={activeBlockerCount}/>
+      <Sidebar view={view} setView={setView} settings={settings}
+        activeBlockers={activeBlockerCount} profile={profile} onLogout={handleLogout}/>
       <main className="main">
+        {loading && <div className="loading-overlay"><div className="loading-spinner"/></div>}
         {cloudErr && (
           <div className="cloud-err-banner">
             <WifiOff size={12}/> {cloudErr}
-            <button className="cloud-retry-btn" onClick={loadAll}><RefreshCw size={11}/> Coba lagi</button>
+            <button className="cloud-retry-btn" onClick={()=>targetUid&&loadAll(targetUid)}><RefreshCw size={11}/> Coba lagi</button>
           </div>
         )}
-        {view==='dashboard'&&<Dashboard entries={entries} projects={projects} blockers={blockers} settings={settings} onToggleTask={toggleTodayTask} onUpdateEntry={updateToday} onSetView={setView}/>}
-        {view==='dailyplan'&&<DailyPlan entries={entries} onUpdateEntry={updateToday}/>}
-        {view==='progress' &&<ProgressUpdate entries={entries} projects={projects} onUpdateEntry={updateToday} onUpdateProject={updateProjectProgress}/>}
-        {view==='timeline' &&<TimelineView entries={entries} onUpdateEntry={updateToday}/>}
-        {view==='projects' &&<ProjectsView projects={projects} onAdd={addProject} onDelete={deleteProject} onUpdate={updateProject}/>}
+        {view==='dashboard'&&<Dashboard
+          entries={entries} projects={projects} blockers={blockers} settings={settings}
+          onToggleTask={isReadOnly?noop:toggleTodayTask}
+          onUpdateEntry={isReadOnly?noop:updateToday}
+          onSetView={setView}
+          profile={profile}
+          allStaff={allStaff}
+          viewingUserId={viewingUserId ?? myUserId ?? ''}
+          myUserId={myUserId ?? ''}
+          onChangeViewingUser={handleChangeViewingUser}
+          isReadOnly={isReadOnly}
+        />}
+        {view==='dailyplan'&&<DailyPlan entries={entries} onUpdateEntry={isReadOnly?noop:updateToday}/>}
+        {view==='progress' &&<ProgressUpdate entries={entries} projects={projects} onUpdateEntry={isReadOnly?noop:updateToday} onUpdateProject={isReadOnly?noop:updateProjectProgress}/>}
+        {view==='timeline' &&<TimelineView entries={entries} onUpdateEntry={isReadOnly?noop:updateToday}/>}
+        {view==='projects' &&<ProjectsView projects={projects} onAdd={isReadOnly?noop:addProject} onDelete={isReadOnly?noop:deleteProject} onUpdate={isReadOnly?noop:updateProject}/>}
         {view==='weekly'   &&<WeeklySummaryView entries={entries}/>}
         {view==='reports'  &&<ReportsView entries={entries} blockers={blockers}/>}
         {view==='calendar' &&<CalendarView entries={entries}/>}
-        {view==='blockers' &&<BlockersView blockers={blockers} onAdd={addBlocker} onResolve={resolveBlocker} onDelete={deleteBlocker} onUpdate={updateBlocker}/>}
-        {view==='settings' &&<SettingsView settings={settings} onSave={saveSettings}/>}
+        {view==='blockers' &&<BlockersView blockers={blockers} onAdd={isReadOnly?noop:addBlocker} onResolve={isReadOnly?noop:resolveBlocker} onDelete={isReadOnly?noop:deleteBlocker} onUpdate={isReadOnly?noop:updateBlocker}/>}
+        {view==='settings' &&<SettingsView settings={settings} onSave={isReadOnly?noop:saveSettings}/>}
       </main>
     </div>
   );

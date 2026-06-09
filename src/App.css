@@ -877,3 +877,251 @@ input:focus, select:focus, textarea:focus { outline: none; }
   color: var(--accent);
   font-weight: 600;
 }
+
+/* ── Auth Pages ──────────────────────────────────────────────────────── */
+.auth-bg {
+  min-height: 100vh;
+  background: #0F0E1A;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  background: #fff;
+  border-radius: 16px;
+  padding: 32px 28px 28px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.35), 0 4px 16px rgba(0,0,0,0.18);
+}
+
+.auth-card-wide {
+  max-width: 440px;
+}
+
+.auth-logo-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.auth-logo-icon {
+  width: 40px;
+  height: 40px;
+  background: var(--accent);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.auth-title {
+  font-size: 22px;
+  font-weight: 800;
+  color: #1a1a2e;
+  letter-spacing: -0.5px;
+  text-align: center;
+  margin-bottom: 4px;
+}
+
+.auth-subtitle {
+  font-size: 13px;
+  color: #888;
+  text-align: center;
+  margin-bottom: 22px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #444;
+  letter-spacing: -0.1px;
+}
+
+.auth-form input,
+.auth-form select {
+  padding: 9px 12px;
+  border: 1.5px solid #e2e2e2;
+  border-radius: 8px;
+  font-size: 13.5px;
+  color: #1a1a1a;
+  background: #fafafa;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.auth-form input:focus,
+.auth-form select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(194,24,91,0.10);
+  background: #fff;
+}
+
+.auth-row2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.auth-error {
+  font-size: 12px;
+  color: #c0392b;
+  background: rgba(192,57,43,0.07);
+  border: 1px solid rgba(192,57,43,0.18);
+  border-radius: 7px;
+  padding: 8px 12px;
+  text-align: center;
+}
+
+.auth-submit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 11px;
+  border-radius: 9px;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+  margin-top: 4px;
+  letter-spacing: -0.1px;
+}
+.auth-submit-btn:hover:not(:disabled) { background: #a31550; }
+.auth-submit-btn:active:not(:disabled) { transform: scale(0.98); }
+.auth-submit-btn:disabled { opacity: 0.65; cursor: not-allowed; }
+
+.auth-spinner {
+  width: 16px; height: 16px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.65s linear infinite;
+  flex-shrink: 0;
+}
+
+.auth-switch {
+  font-size: 12.5px;
+  color: #888;
+  text-align: center;
+  margin-top: 12px;
+}
+
+.auth-switch-link {
+  color: var(--accent);
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: none;
+  margin-left: 4px;
+  background: none;
+  border: none;
+  font-size: inherit;
+  padding: 0;
+}
+.auth-switch-link:hover { text-decoration: underline; }
+
+/* ── Sidebar auth additions ──────────────────────────────────────────── */
+.sb-role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(120,120,140,0.18);
+  color: #888;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+}
+
+.sb-role-badge.sb-role-atasan {
+  background: rgba(212,160,23,0.18);
+  color: #b8860b;
+}
+
+.sb-logout-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  margin-top: 2px;
+  text-align: left;
+}
+.sb-logout-btn:hover { background: rgba(194,24,91,0.07); color: var(--accent); }
+
+/* ── Atasan selector (Dashboard topbar) ──────────────────────────────── */
+.atasan-selector-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: #fff;
+  border: 1.5px solid rgba(194,24,91,0.22);
+  border-radius: 8px;
+  padding: 5px 9px;
+}
+
+.atasan-select {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  padding: 0;
+  max-width: 160px;
+}
+
+/* ── Read-only banner ────────────────────────────────────────────────── */
+.readonly-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: rgba(194,24,91,0.07);
+  border-bottom: 1px solid rgba(194,24,91,0.15);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* ── Loading overlay ─────────────────────────────────────────────────── */
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.55);
+  z-index: 50;
+  pointer-events: none;
+}
