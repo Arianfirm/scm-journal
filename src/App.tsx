@@ -13,8 +13,9 @@ import {
   Plus, X, FileText, Briefcase,
   CheckCircle2, Circle, Target, Calendar, SquareCheck,
   Smile, Meh, Frown, Zap, Activity, Coffee, Code,
-  Pencil, Check,
+  Pencil, Check, WifiOff, RefreshCw,
 } from 'lucide-react';
+import { supabase } from './supabaseClient';
 import './App.css';
 
 Chart.register(...registerables);
@@ -26,6 +27,22 @@ if (!localStorage.getItem('scm_v2_clean')) {
   localStorage.removeItem('scm_blockers');
   localStorage.setItem('scm_v2_clean', '1');
 }
+
+/* ── Stable user identity (persisted in localStorage) ────────────────── */
+const USER_ID: string = (() => {
+  const stored = localStorage.getItem('scm_user_id');
+  if (stored) return stored;
+  const id = crypto.randomUUID();
+  localStorage.setItem('scm_user_id', id);
+  return id;
+})();
+
+/* ── Project accent colors (not stored in DB) ─────────────────────────── */
+const PROJ_PALETTE = ['#C2185B','#7C6FF7','#4ECBA4','#F5A623','#F06060','#4FC3F7','#9575CD','#26A69A'];
+
+/* ── Fire-and-forget Supabase mutation (logs errors, never throws) ────── */
+const dbFire = (q: PromiseLike<unknown>) =>
+  Promise.resolve(q).catch(e => console.error('[Supabase]', e));
 
 /* ── Types ────────────────────────────────────────────────────────────── */
 type Priority   = 'tinggi' | 'sedang' | 'rendah';
@@ -1263,47 +1280,281 @@ function Sidebar({ view, setView, settings, activeBlockers }:{
 
 /* ── App (root) ───────────────────────────────────────────────────────── */
 export default function App() {
-  const [view, setView] = useState<View>('dashboard');
+  const [view,     setView]     = useState<View>('dashboard');
+  const [loading,  setLoading]  = useState(true);
+  const [cloudErr, setCloudErr] = useState<string|null>(null);
 
-  const [entries, setEntries] = useState<Entry[]>(()=>{
-    const loaded = load<Entry[]>('scm_entries',[]);
-    const hasToday = loaded.some(e=>e.date===todayStr());
-    return hasToday ? loaded : [emptyEntry(), ...loaded];
-  });
-  const [projects, setProjects] = useState<Project[]>(()=>load<Project[]>('scm_projects',[]));
-  const [blockers, setBlockers] = useState<Blocker[]>(()=>load<Blocker[]>('scm_blockers',[]));
-  const [settings, setSettings] = useState<AppSettings>(()=>load<AppSettings>('scm_settings',DEFAULT_SETTINGS));
+  const [entries,  setEntries]  = useState<Entry[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [blockers, setBlockers] = useState<Blocker[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  useEffect(()=>{ persist('scm_entries',  entries);  },[entries]);
-  useEffect(()=>{ persist('scm_projects', projects); },[projects]);
-  useEffect(()=>{ persist('scm_blockers', blockers); },[blockers]);
-  useEffect(()=>{ persist('scm_settings', settings); },[settings]);
+  /* ── Supabase helpers ──────────────────────────────────────────────── */
 
-  const updateToday = (patch:Partial<Entry>) =>
-    setEntries(prev=>prev.map(e=>e.date===todayStr()?{ ...e, ...patch }:e));
-
-  const toggleTodayTask = (taskId:string) => {
-    const today = entries.find(e=>e.date===todayStr());
-    if (!today) return;
-    updateToday({ tasks:today.tasks.map(t=>t.id===taskId?{ ...t, done:!t.done, status:!t.done?'selesai':'belum_mulai' }:t) });
+  /** Sync an entry's tasks to Supabase (delete-then-insert for simplicity). */
+  const syncTasks = (date: string, tasks: Task[]) => {
+    (async () => {
+      await supabase.from('tasks').delete().eq('user_id', USER_ID).eq('date', date);
+      if (tasks.length) {
+        await supabase.from('tasks').insert(
+          tasks.map(t => ({ id:t.id, user_id:USER_ID, date, text:t.text, done:t.done, priority:t.priority, status:t.status }))
+        );
+      }
+    })().catch(console.error);
   };
 
-  const activeBlockerCount = blockers.filter(b=>!b.resolved).length;
+  /** Sync an entry's timeline to Supabase. DB uses title/status for activity/category. */
+  const syncTimeline = (date: string, timeline: TLItem[]) => {
+    (async () => {
+      await supabase.from('timeline').delete().eq('user_id', USER_ID).eq('date', date);
+      if (timeline.length) {
+        await supabase.from('timeline').insert(
+          timeline.map(tl => ({ id:tl.id, user_id:USER_ID, date, time:tl.time, title:tl.activity, status:tl.category }))
+        );
+      }
+    })().catch(console.error);
+  };
+
+  /** Upsert a daily note (check-then-insert/update pattern). */
+  const syncNotes = (date: string, content: string) => {
+    (async () => {
+      const { data } = await supabase.from('notes').select('id').eq('user_id', USER_ID).eq('date', date).maybeSingle();
+      if (data) {
+        await supabase.from('notes').update({ content, updated_at: new Date().toISOString() }).eq('id', data.id);
+      } else {
+        await supabase.from('notes').insert({ user_id:USER_ID, date, content });
+      }
+    })().catch(console.error);
+  };
+
+  /* ── Initial load from Supabase ────────────────────────────────────── */
+  const loadAll = async () => {
+    setLoading(true);
+    setCloudErr(null);
+    try {
+      const [tasksRes, tlRes, notesRes, projRes, blockRes, settRes] = await Promise.all([
+        supabase.from('tasks').select('*').eq('user_id', USER_ID),
+        supabase.from('timeline').select('*').eq('user_id', USER_ID),
+        supabase.from('notes').select('*').eq('user_id', USER_ID),
+        supabase.from('projects').select('*').eq('user_id', USER_ID),
+        supabase.from('blockers').select('*').eq('user_id', USER_ID),
+        supabase.from('settings').select('*').eq('user_id', USER_ID).maybeSingle(),
+      ]);
+
+      if (tasksRes.error || tlRes.error || notesRes.error || projRes.error || blockRes.error)
+        throw new Error('Query error');
+
+      /* Build Entry objects from flat tables */
+      const allDates = new Set<string>([
+        ...(tasksRes.data?.map(t => t.date) ?? []),
+        ...(tlRes.data?.map(t => t.date) ?? []),
+        ...(notesRes.data?.map(n => n.date) ?? []),
+        todayStr(),
+      ]);
+
+      const getLocal = (date: string) => {
+        try { return JSON.parse(localStorage.getItem(`scm_local_${date}`) || '{}'); } catch { return {}; }
+      };
+
+      const builtEntries: Entry[] = Array.from(allDates)
+        .sort((a, b) => b.localeCompare(a))
+        .map(date => {
+          const local = getLocal(date);
+          return {
+            id: date,
+            date,
+            title: format(parseISO(date), 'EEEE, d MMMM yyyy', { locale:id }),
+            notes: notesRes.data?.find(n => n.date === date)?.content ?? '',
+            mood:      (local.mood      ?? null) as Mood|null,
+            jamKerja:  (local.jamKerja  ?? 0)   as number,
+            tasks: (tasksRes.data?.filter(t => t.date === date) ?? []).map(t => ({
+              id: t.id, text: t.text, done: t.done,
+              priority: t.priority as Priority, status: t.status as TaskStatus,
+            })),
+            timeline: (tlRes.data?.filter(tl => tl.date === date) ?? [])
+              .sort((a, b) => (a.time as string).localeCompare(b.time as string))
+              .map(tl => ({
+                id: tl.id, time: tl.time,
+                activity: tl.title,
+                category: tl.status as TLItem['category'],
+              })),
+          };
+        });
+      setEntries(builtEntries);
+      persist('scm_entries', builtEntries);
+
+      /* Projects — color stored in localStorage since DB has no color column */
+      const storedColors = load<Record<string, string>>('scm_proj_colors', {});
+      const builtProjects: Project[] = (projRes.data ?? []).map((p, i) => ({
+        id: p.id, name: p.name, progress: p.progress,
+        status: p.status as Project['status'],
+        color: storedColors[p.id] ?? PROJ_PALETTE[i % PROJ_PALETTE.length],
+      }));
+      setProjects(builtProjects);
+      persist('scm_projects', builtProjects);
+
+      /* Blockers — date derived from created_at since DB has no date column */
+      const builtBlockers: Blocker[] = (blockRes.data ?? []).map(b => ({
+        id: b.id, title: b.title, dampak: b.dampak ?? '',
+        priority: b.priority as Blocker['priority'], resolved: b.resolved,
+        date: b.created_at ? (b.created_at as string).slice(0, 10) : todayStr(),
+      }));
+      setBlockers(builtBlockers);
+      persist('scm_blockers', builtBlockers);
+
+      /* Settings — upsert defaults on first use */
+      if (settRes.data) {
+        const s: AppSettings = {
+          nama: settRes.data.nama, jabatan: settRes.data.jabatan,
+          targetTask: settRes.data.target_task, targetJam: settRes.data.target_jam,
+        };
+        setSettings(s);
+        persist('scm_settings', s);
+      } else {
+        await supabase.from('settings').insert({
+          user_id: USER_ID,
+          nama:        DEFAULT_SETTINGS.nama,
+          jabatan:     DEFAULT_SETTINGS.jabatan,
+          target_task: DEFAULT_SETTINGS.targetTask,
+          target_jam:  DEFAULT_SETTINGS.targetJam,
+        });
+        setSettings(DEFAULT_SETTINGS);
+      }
+
+    } catch (err) {
+      console.error('Supabase load failed — falling back to localStorage:', err);
+      setCloudErr('Tidak dapat terhubung ke cloud. Menggunakan data lokal.');
+      const loaded = load<Entry[]>('scm_entries', []);
+      setEntries(loaded.some(e => e.date === todayStr()) ? loaded : [emptyEntry(), ...loaded]);
+      setProjects(load<Project[]>('scm_projects', []));
+      setBlockers(load<Blocker[]>('scm_blockers', []));
+      setSettings(load<AppSettings>('scm_settings', DEFAULT_SETTINGS));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── Entry mutations ───────────────────────────────────────────────── */
+  const updateEntry = (date: string, patch: Partial<Entry>) => {
+    setEntries(prev => {
+      const updated = prev.map(e => e.date === date ? { ...e, ...patch } : e);
+      persist('scm_entries', updated);
+      return updated;
+    });
+    if ('tasks'    in patch && patch.tasks    !== undefined) syncTasks(date, patch.tasks);
+    if ('timeline' in patch && patch.timeline !== undefined) syncTimeline(date, patch.timeline);
+    if ('notes'    in patch)                                  syncNotes(date, patch.notes ?? '');
+    if ('mood' in patch || 'jamKerja' in patch) {
+      const cur = entries.find(e => e.date === date);
+      localStorage.setItem(`scm_local_${date}`, JSON.stringify({
+        mood: cur?.mood ?? null, jamKerja: cur?.jamKerja ?? 0, ...patch,
+      }));
+    }
+  };
+
+  const updateToday = (patch: Partial<Entry>) => updateEntry(todayStr(), patch);
+
+  const toggleTodayTask = (taskId: string) => {
+    const today = entries.find(e => e.date === todayStr());
+    if (!today) return;
+    updateToday({ tasks: today.tasks.map(t =>
+      t.id === taskId ? { ...t, done: !t.done, status: !t.done ? 'selesai' : 'belum_mulai' } : t
+    )});
+  };
+
+  /* ── Project mutations ─────────────────────────────────────────────── */
+  const addProject = (p: Project) => {
+    setProjects(prev => { const u = [...prev, p]; persist('scm_projects', u); return u; });
+    const colors = load<Record<string,string>>('scm_proj_colors', {});
+    persist('scm_proj_colors', { ...colors, [p.id]: p.color });
+    dbFire(supabase.from('projects').insert({ id:p.id, user_id:USER_ID, name:p.name, progress:p.progress, status:p.status }));
+  };
+
+  const updateProject = (p: Project) => {
+    setProjects(prev => { const u = prev.map(x => x.id===p.id ? p : x); persist('scm_projects', u); return u; });
+    const colors = load<Record<string,string>>('scm_proj_colors', {});
+    persist('scm_proj_colors', { ...colors, [p.id]: p.color });
+    dbFire(supabase.from('projects').update({ name:p.name, progress:p.progress, status:p.status }).eq('id', p.id).eq('user_id', USER_ID));
+  };
+
+  const deleteProject = (id: string) => {
+    setProjects(prev => { const u = prev.filter(p => p.id!==id); persist('scm_projects', u); return u; });
+    dbFire(supabase.from('projects').delete().eq('id', id).eq('user_id', USER_ID));
+  };
+
+  const updateProjectProgress = (id: string, progress: number) => {
+    setProjects(prev => { const u = prev.map(x => x.id===id ? { ...x, progress } : x); persist('scm_projects', u); return u; });
+    dbFire(supabase.from('projects').update({ progress }).eq('id', id).eq('user_id', USER_ID));
+  };
+
+  /* ── Blocker mutations ─────────────────────────────────────────────── */
+  const addBlocker = (b: Blocker) => {
+    setBlockers(prev => { const u = [...prev, b]; persist('scm_blockers', u); return u; });
+    dbFire(supabase.from('blockers').insert({ id:b.id, user_id:USER_ID, title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }));
+  };
+
+  const resolveBlocker = (id: string) => {
+    setBlockers(prev => { const u = prev.map(b => b.id===id ? { ...b, resolved:true } : b); persist('scm_blockers', u); return u; });
+    dbFire(supabase.from('blockers').update({ resolved:true }).eq('id', id).eq('user_id', USER_ID));
+  };
+
+  const deleteBlocker = (id: string) => {
+    setBlockers(prev => { const u = prev.filter(b => b.id!==id); persist('scm_blockers', u); return u; });
+    dbFire(supabase.from('blockers').delete().eq('id', id).eq('user_id', USER_ID));
+  };
+
+  const updateBlocker = (b: Blocker) => {
+    setBlockers(prev => { const u = prev.map(x => x.id===b.id ? b : x); persist('scm_blockers', u); return u; });
+    dbFire(supabase.from('blockers').update({ title:b.title, dampak:b.dampak, priority:b.priority, resolved:b.resolved }).eq('id', b.id).eq('user_id', USER_ID));
+  };
+
+  /* ── Settings mutation ─────────────────────────────────────────────── */
+  const saveSettings = (s: AppSettings) => {
+    setSettings(s);
+    persist('scm_settings', s);
+    dbFire(supabase.from('settings').update({
+      nama: s.nama, jabatan: s.jabatan,
+      target_task: s.targetTask, target_jam: s.targetJam,
+      updated_at: new Date().toISOString(),
+    }).eq('user_id', USER_ID));
+  };
+
+  /* ── Render ─────────────────────────────────────────────────────────── */
+  const activeBlockerCount = blockers.filter(b => !b.resolved).length;
+
+  if (loading) {
+    return (
+      <div className="layout">
+        <div className="loading-screen">
+          <div className="loading-spinner"/>
+          <p>Memuat data dari cloud…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="layout">
       <Sidebar view={view} setView={setView} settings={settings} activeBlockers={activeBlockerCount}/>
       <main className="main">
+        {cloudErr && (
+          <div className="cloud-err-banner">
+            <WifiOff size={12}/> {cloudErr}
+            <button className="cloud-retry-btn" onClick={loadAll}><RefreshCw size={11}/> Coba lagi</button>
+          </div>
+        )}
         {view==='dashboard'&&<Dashboard entries={entries} projects={projects} blockers={blockers} settings={settings} onToggleTask={toggleTodayTask} onUpdateEntry={updateToday} onSetView={setView}/>}
         {view==='dailyplan'&&<DailyPlan entries={entries} onUpdateEntry={updateToday}/>}
-        {view==='progress' &&<ProgressUpdate entries={entries} projects={projects} onUpdateEntry={updateToday} onUpdateProject={(id,p)=>setProjects(prev=>prev.map(x=>x.id===id?{ ...x,progress:p }:x))}/>}
+        {view==='progress' &&<ProgressUpdate entries={entries} projects={projects} onUpdateEntry={updateToday} onUpdateProject={updateProjectProgress}/>}
         {view==='timeline' &&<TimelineView entries={entries} onUpdateEntry={updateToday}/>}
-        {view==='projects' &&<ProjectsView projects={projects} onAdd={p=>setProjects(prev=>[...prev,p])} onDelete={id=>setProjects(prev=>prev.filter(p=>p.id!==id))} onUpdate={p=>setProjects(prev=>prev.map(x=>x.id===p.id?p:x))}/>}
+        {view==='projects' &&<ProjectsView projects={projects} onAdd={addProject} onDelete={deleteProject} onUpdate={updateProject}/>}
         {view==='weekly'   &&<WeeklySummaryView entries={entries}/>}
         {view==='reports'  &&<ReportsView entries={entries} blockers={blockers}/>}
         {view==='calendar' &&<CalendarView entries={entries}/>}
-        {view==='blockers' &&<BlockersView blockers={blockers} onAdd={b=>setBlockers(prev=>[...prev,b])} onResolve={id=>setBlockers(prev=>prev.map(b=>b.id===id?{ ...b,resolved:true }:b))} onDelete={id=>setBlockers(prev=>prev.filter(b=>b.id!==id))} onUpdate={b=>setBlockers(prev=>prev.map(x=>x.id===b.id?b:x))}/>}
-        {view==='settings' &&<SettingsView settings={settings} onSave={setSettings}/>}
+        {view==='blockers' &&<BlockersView blockers={blockers} onAdd={addBlocker} onResolve={resolveBlocker} onDelete={deleteBlocker} onUpdate={updateBlocker}/>}
+        {view==='settings' &&<SettingsView settings={settings} onSave={saveSettings}/>}
       </main>
     </div>
   );
