@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd \"d:\\\\SCM_Journal_V2\"; npx tailwindcss init 2>&1; echo \"exit: $LASTEXITCODE\")",
+      "PowerShell(cd \"d:\\\\SCM_Journal_V2\"; Get-ChildItem node_modules\\\\tailwindcss\\\\lib\\\\cli.js -ErrorAction SilentlyContinue; node node_modules\\\\tailwindcss\\\\lib\\\\cli.js init 2>&1; echo \"exit: $LASTEXITCODE\")"
+    ]
+  }
+}
